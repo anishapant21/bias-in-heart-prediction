@@ -241,40 +241,152 @@ visualize_coefficient_comparison("Male 50s", intersect_coeffs["Male 50s"],
                               "Female 50s", intersect_coeffs["Female 50s"])
 
 
-def visualize_coefficient_differences(group1_name, group1_coeffs, group2_name, group2_coeffs, top_n=8):
-    """Create a visualization showing the magnitude of coefficient differences"""
-    comparison_df = visualize_coefficient_comparison(group1_name, group1_coeffs, 
-                                                   group2_name, group2_coeffs, 
-                                                   top_n=15)  # Get more features
+# ------------------------------------- SINGLE MODEL --------------------------------------------------------------------------------
+
+# Import necessary libraries for model evaluation
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
+
+# Prepare data for modeling
+X = df.drop(['Diagnosis', 'Age Group', 'Gender_Age_Group'], axis=1)
+X = pd.get_dummies(X, drop_first=True)  # One-hot encode categorical variables
+y = df['Diagnosis']
+
+# Split data into train and test sets
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42, stratify=y)
+
+# Standardize features
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
+
+# Train a logistic regression model on the full training data
+print("\n===== Training Model on Full Dataset =====")
+model = LogisticRegression(C=1.0, solver='liblinear', random_state=42)
+model.fit(X_train_scaled, y_train)
+
+# Evaluate overall model performance
+y_pred = model.predict(X_test_scaled)
+y_prob = model.predict_proba(X_test_scaled)[:, 1]  # Probability of positive class
+
+print("\nOverall Model Performance:")
+print(f"Accuracy: {accuracy_score(y_test, y_pred):.4f}")
+print(f"Precision: {precision_score(y_test, y_pred):.4f}")
+print(f"Recall: {recall_score(y_test, y_pred):.4f}")
+print(f"F1 Score: {f1_score(y_test, y_pred):.4f}")
+print(f"ROC AUC: {roc_auc_score(y_test, y_prob):.4f}")
+
+# Function to evaluate model performance on a specific subgroup
+def evaluate_subgroup_performance(subgroup_name, subgroup_condition):
+    """Evaluate model performance on a specific demographic subgroup"""
+    # Get indices of test set samples in this subgroup
+    subgroup_indices = X_test[subgroup_condition].index
     
-    if comparison_df is None:
+    if len(subgroup_indices) < 10:
+        print(f"Skipping {subgroup_name} due to insufficient test samples")
+        return None
+    
+    # Get predictions for this subgroup
+    X_sub_test = X_test.loc[subgroup_indices]
+    y_sub_test = y_test.loc[subgroup_indices]
+    X_sub_test_scaled = scaler.transform(X_sub_test)
+    
+    y_sub_pred = model.predict(X_sub_test_scaled)
+    y_sub_prob = model.predict_proba(X_sub_test_scaled)[:, 1]
+    
+    # Calculate performance metrics
+    metrics = {
+        'subgroup': subgroup_name,
+        'size': len(subgroup_indices),
+        'accuracy': accuracy_score(y_sub_test, y_sub_pred),
+        'precision': precision_score(y_sub_test, y_sub_pred, zero_division=0),
+        'recall': recall_score(y_sub_test, y_sub_pred, zero_division=0),
+        'f1': f1_score(y_sub_test, y_sub_pred, zero_division=0)
+    }
+    
+    # Add ROC AUC if both classes are present
+    if len(np.unique(y_sub_test)) > 1:
+        metrics['roc_auc'] = roc_auc_score(y_sub_test, y_sub_prob)
+    
+    print(f"\nPerformance for {subgroup_name} (n={metrics['size']}):")
+    print(f"Accuracy: {metrics['accuracy']:.4f}")
+    print(f"Precision: {metrics['precision']:.4f}")
+    print(f"Recall: {metrics['recall']:.4f}")
+    print(f"F1 Score: {metrics['f1']:.4f}")
+    if 'roc_auc' in metrics:
+        print(f"ROC AUC: {metrics['roc_auc']:.4f}")
+    
+    return metrics
+
+# Evaluate performance across gender groups
+print("\n===== Model Performance by Gender =====")
+male_metrics = evaluate_subgroup_performance("Male", male_condition)
+female_metrics = evaluate_subgroup_performance("Female", female_condition)
+
+# Evaluate performance across age groups
+print("\n===== Model Performance by Age Group =====")
+age_metrics = {}
+for age_group in ["40s", "50s", "60s"]:
+    age_condition = df['Age Group'] == age_group
+    age_metrics[age_group] = evaluate_subgroup_performance(f"Age {age_group}", age_condition)
+
+# Evaluate performance across intersectional groups
+print("\n===== Model Performance by Intersectional Group =====")
+intersect_metrics = {}
+for group_name, condition in intersectional_groups:
+    intersect_metrics[group_name] = evaluate_subgroup_performance(group_name, condition)
+
+# Visualize performance metrics across groups
+def plot_performance_comparison(metrics_list, metric_name="accuracy", title=None):
+    """Plot comparison of a specific performance metric across groups"""
+    # Filter out None values
+    metrics_list = [m for m in metrics_list if m is not None]
+    
+    if not metrics_list:
+        print(f"No metrics to visualize for {metric_name}")
         return
     
-    # Take top N differences
-    diff_df = comparison_df[['Feature', 'Difference']].sort_values('Difference', ascending=False).head(top_n)
+    # Create dataframe for plotting
+    plot_data = pd.DataFrame([
+        {'Group': m['subgroup'], metric_name: m[metric_name]}
+        for m in metrics_list if metric_name in m
+    ])
     
-    # Create bar chart of differences
-    plt.figure(figsize=(10, 8))
-    bars = sns.barplot(x='Difference', y='Feature', data=diff_df, palette='viridis')
+    if len(plot_data) < 2:
+        print(f"Not enough groups to compare for {metric_name}")
+        return
     
-    # Add value labels to bars
+    plt.figure(figsize=(10, 6))
+    bars = sns.barplot(x='Group', y=metric_name, data=plot_data)
+    
+    # Add value labels
     for bar in bars.patches:
-        bars.text(bar.get_width() + 0.1, 
-                bar.get_y() + bar.get_height()/2, 
-                f'{bar.get_width():.2f}', 
-                ha='left', va='center')
+        bars.text(bar.get_x() + bar.get_width()/2., 
+                bar.get_height() + 0.01, 
+                f'{bar.get_height():.3f}', 
+                ha='center')
     
-    plt.title(f'Features with Largest Coefficient Differences\n{group1_name} vs {group2_name}', fontsize=16)
-    plt.xlabel('Absolute Difference in Coefficient Value', fontsize=12)
-    plt.ylabel('Feature', fontsize=12)
+    if title:
+        plt.title(title, fontsize=16)
+    else:
+        plt.title(f'{metric_name.capitalize()} Comparison Across Groups', fontsize=16)
+    
+    plt.ylim(0, max(plot_data[metric_name]) * 1.2)  # Add some space for the labels
+    plt.xticks(rotation=45, ha='right')
     plt.tight_layout()
-    
-    # Save the figure
-    plt.savefig(f'coefficient_differences_{group1_name}_{group2_name}.png', dpi=300)
+    plt.savefig(f'performance_{metric_name}.png', dpi=300)
     plt.show()
 
-# Visualize the differences
-visualize_coefficient_differences("Male", male_coeffs, "Female", female_coeffs)
-visualize_coefficient_differences("Age 40s", age_coeffs["40s"], "Age 60s", age_coeffs["60s"])
-visualize_coefficient_differences("Male 50s", intersect_coeffs["Male 50s"], 
-                               "Female 50s", intersect_coeffs["Female 50s"])
+# Combine all metrics for visualization
+all_metrics = [male_metrics, female_metrics]
+all_metrics.extend([m for m in age_metrics.values() if m is not None])
+all_metrics.extend([m for m in intersect_metrics.values() if m is not None])
+
+# Plot comparisons of different metrics
+for metric in ['accuracy', 'precision', 'recall', 'f1']:
+    plot_performance_comparison(all_metrics, metric)
+
+# Plot ROC AUC separately (since not all groups might have it)
+roc_metrics = [m for m in all_metrics if m is not None and 'roc_auc' in m]
+if roc_metrics:
+    plot_performance_comparison(roc_metrics, 'roc_auc')
