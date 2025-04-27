@@ -1,3 +1,4 @@
+# update2 with cv and metri for overfitting
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -7,9 +8,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 import matplotlib as mpl
-
-from sklearn.model_selection import train_test_split, cross_val_score, KFold, StratifiedKFold
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, make_scorer
 
 df = pd.read_csv('./dataset/heart_disease_uci.csv')
 
@@ -60,8 +58,8 @@ print("\nNumerical features:", numerical_features)
 print("Categorical features:", categorical_features)
 
 # Set up the age groups
-df['Age Group'] = pd.cut(df['Age'], bins=[29, 50, 60, 100], 
-                        labels=["30s-40s", "50s", "60+"])
+df['Age Group'] = pd.cut(df['Age'], bins=[29, 40, 50, 60, 70, 100], 
+                        labels=["30s", "40s", "50s", "60s", "70+"])
 
 # Create gender-age intersectional groups
 df['Gender_Age_Group'] = df['Sex'].astype(str) + "_" + df['Age Group'].astype(str)
@@ -76,8 +74,58 @@ print(df['Age Group'].value_counts())
 print("\nIntersectional group distribution:")
 print(df['Gender_Age_Group'].value_counts())
 
+# Create age groups and intersectional groups
+df['Age Group'] = pd.cut(df['Age'], bins=[29, 40, 50, 60, 70, 100], 
+                        labels=["30s", "40s", "50s", "60s", "70+"])
+df['Gender_Age_Group'] = df['Sex'].astype(str) + "_" + df['Age Group'].astype(str)
+
+# Print the counts to see what we're working with
+print("\nGender distribution:")
+print(df['Sex'].value_counts())
+
+print("\nAge group distribution:")
+print(df['Age Group'].value_counts())
+
+print("\nIntersectional group distribution:")
+print(df['Gender_Age_Group'].value_counts())
+
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
+from sklearn.utils import resample
+
+def bootstrap_metric(y_true, y_pred, metric_func, n_iterations=1000):
+    """Calculate 95% confidence intervals for a metric using bootstrapping"""
+    # Handle cases with very small sample sizes
+    if len(y_true) < 10:
+        return None, None  # Not enough data for reliable bootstrap
+    
+    scores = []
+    for i in range(n_iterations):
+        # Resample with replacement
+        indices = resample(range(len(y_true)), n_samples=len(y_true))
+        
+        # Extract bootstrapped samples
+        if hasattr(y_true, 'iloc'):  # If pandas Series
+            y_true_bootstrap = y_true.iloc[indices]
+        else:  # If numpy array
+            y_true_bootstrap = [y_true[i] for i in indices]
+            
+        y_pred_bootstrap = [y_pred[i] for i in indices]
+        
+        # Calculate metric, handling potential errors
+        try:
+            score = metric_func(y_true_bootstrap, y_pred_bootstrap)
+            scores.append(score)
+        except:
+            continue
+    
+    if len(scores) < 100:  # Need enough successful iterations
+        return None, None
+        
+    # Calculate 95% confidence interval
+    lower = np.percentile(scores, 2.5)
+    upper = np.percentile(scores, 97.5)
+    return lower, upper
 
 def analyze_coefficients_for_subgroup(df, subgroup_name, subgroup_condition):
     """
@@ -139,21 +187,28 @@ female_coeffs = analyze_coefficients_for_subgroup(df, "Female", female_condition
 # Analyze by age groups
 print("\n===== Age-based Coefficient Analysis =====")
 age_coeffs = {}
-for age_group in ["30s-40s", "50s", "60+"]:  # Focus on groups with more samples
+for age_group in ["40s", "50s", "60s"]:  # Focus on groups with more samples
     age_coeffs[age_group] = analyze_coefficients_for_subgroup(
         df, f"Age {age_group}", df['Age Group'] == age_group
     )
 
 # Adjust intersectional group definitions based on what we find
-intersectional_groups = [
-    ("Male 30s-40s", (male_condition) & (df['Age Group'] == "30s-40s")),
-    ("Male 50s", (male_condition) & (df['Age Group'] == "50s")),
-    ("Male 60+", (male_condition) & (df['Age Group'] == "60+")),
-    ("Female 30s-40s", (female_condition) & (df['Age Group'] == "30s-40s")),
-    ("Female 50s", (female_condition) & (df['Age Group'] == "50s")),
-    ("Female 60+", (female_condition) & (df['Age Group'] == "60+"))
+# intersectional_groups = [
+#     ("Male 50s", (male_condition) & (df['Age Group'] == "50s")),
+#     ("Male 40s", (male_condition) & (df['Age Group'] == "40s")),
+#     ("Female 50s", (female_condition) & (df['Age Group'] == "50s"))
+# ]
 
+intersectional_groups = [
+    ("Male 50s", (male_condition) & (df['Age Group'] == "50s")),
+    ("Male 40s", (male_condition) & (df['Age Group'] == "40s")),
+    ("Female 50s", (female_condition) & (df['Age Group'] == "50s")),
+    ("Female 40s", (female_condition) & (df['Age Group'] == "40s")),
+    ("Male 60+", (male_condition) & (df['Age Group'].isin(["60s", "70+"]))),  # Male 60+ group
+    ("Female 60+", (female_condition) & (df['Age Group'].isin(["60s", "70+"])))  # Female 60+ group
 ]
+
+
 
 # Verify the group sizes
 for name, condition in intersectional_groups:
@@ -217,7 +272,7 @@ def visualize_coefficient_comparison(group1_name, group1_coeffs, group2_name, gr
     
     # Save the figure
     plt.savefig(f'coefficient_comparison_{group1_name}_{group2_name}.png', dpi=300)
-    # plt.show()
+    plt.show()
     
     return comparison_df
 
@@ -226,7 +281,7 @@ def visualize_coefficient_comparison(group1_name, group1_coeffs, group2_name, gr
 visualize_coefficient_comparison("Male", male_coeffs, "Female", female_coeffs)
 
 # 2. Age comparison (40s vs 60s)
-visualize_coefficient_comparison("Age 40s", age_coeffs["30s-40s"], "Age 60s", age_coeffs["60+"])
+visualize_coefficient_comparison("Age 40s", age_coeffs["40s"], "Age 60s", age_coeffs["60s"])
 
 # 3. Intersectional comparison (Male 50s vs Female 50s)
 visualize_coefficient_comparison("Male 50s", intersect_coeffs["Male 50s"], 
@@ -238,13 +293,6 @@ visualize_coefficient_comparison("Male 50s", intersect_coeffs["Male 50s"],
 # Import necessary libraries for model evaluation
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
-
-# ------------------------------------- SINGLE MODEL WITH CROSS-VALIDATION --------------------------------------------------------------------------------
-
-# Import necessary libraries for model evaluation and cross-validation
-from sklearn.model_selection import train_test_split, cross_val_score, KFold, StratifiedKFold
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, make_scorer
-from sklearn.model_selection import GridSearchCV
 
 # Prepare data for modeling
 X = df.drop(['Diagnosis', 'Age Group', 'Gender_Age_Group'], axis=1)
@@ -259,62 +307,16 @@ scaler = StandardScaler()
 X_train_scaled = scaler.fit_transform(X_train)
 X_test_scaled = scaler.transform(X_test)
 
-# Set up cross-validation
-cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)  # Using stratified k-fold to maintain class balance
-
-# Define model
+# Train a logistic regression model on the full training data
+print("\n===== Training Model on Full Dataset =====")
 model = LogisticRegression(C=1.0, solver='liblinear', random_state=42)
-
-# Perform cross-validation and get scores
-print("\n===== Cross-Validation Results =====")
-cv_accuracy = cross_val_score(model, X_train_scaled, y_train, cv=cv, scoring='accuracy')
-cv_precision = cross_val_score(model, X_train_scaled, y_train, cv=cv, scoring='precision')
-cv_recall = cross_val_score(model, X_train_scaled, y_train, cv=cv, scoring='recall')
-cv_f1 = cross_val_score(model, X_train_scaled, y_train, cv=cv, scoring='f1')
-cv_roc_auc = cross_val_score(model, X_train_scaled, y_train, cv=cv, scoring='roc_auc')
-
-print(f"Cross-validated Accuracy: {cv_accuracy.mean():.4f} (±{cv_accuracy.std():.4f})")
-print(f"Cross-validated Precision: {cv_precision.mean():.4f} (±{cv_precision.std():.4f})")
-print(f"Cross-validated Recall: {cv_recall.mean():.4f} (±{cv_recall.std():.4f})")
-print(f"Cross-validated F1 Score: {cv_f1.mean():.4f} (±{cv_f1.std():.4f})")
-print(f"Cross-validated ROC AUC: {cv_roc_auc.mean():.4f} (±{cv_roc_auc.std():.4f})")
-
-# Define parameter grid to search
-param_grid = {
-    'C': [0.01, 0.1, 1.0, 5.0, 10.0],
-    'penalty': ['l1', 'l2'],
-    'solver': ['liblinear']  # liblinear supports both l1 and l2
-}
-
-# Set up grid search with cross-validation
-grid_search = GridSearchCV(
-    LogisticRegression(random_state=42),
-    param_grid,
-    cv=cv,
-    scoring='roc_auc',  # You can change this to 'accuracy', 'f1', etc.
-    n_jobs=-1  # Use all available cores
-)
-
-# Fit grid search
-print("\n===== Performing Hyperparameter Tuning with Cross-Validation =====")
-grid_search.fit(X_train_scaled, y_train)
-
-# Get best parameters and score
-print(f"Best parameters: {grid_search.best_params_}")
-print(f"Best cross-validation score: {grid_search.best_score_:.4f}")
-
-# Use the best model for final evaluation
-model = grid_search.best_estimator_
-
-# Train the final model on the full training data
-print("\n===== Training Final Model on Full Training Dataset =====")
 model.fit(X_train_scaled, y_train)
 
-# Evaluate overall model performance on the test set
+# Evaluate overall model performance
 y_pred = model.predict(X_test_scaled)
 y_prob = model.predict_proba(X_test_scaled)[:, 1]  # Probability of positive class
 
-print("\nFinal Model Performance on Test Set:")
+print("\nOverall Model Performance:")
 print(f"Accuracy: {accuracy_score(y_test, y_pred):.4f}")
 print(f"Precision: {precision_score(y_test, y_pred):.4f}")
 print(f"Recall: {recall_score(y_test, y_pred):.4f}")
@@ -322,10 +324,96 @@ print(f"F1 Score: {f1_score(y_test, y_pred):.4f}")
 print(f"ROC AUC: {roc_auc_score(y_test, y_prob):.4f}")
 
 # Function to evaluate model performance on a specific subgroup
+# def evaluate_subgroup_performance(subgroup_name, subgroup_condition):
+#     """Evaluate model performance on a specific demographic subgroup"""
+#     # Get indices of test set samples in this subgroup
+#     subgroup_indices = X_test[subgroup_condition].index
+    
+#     if len(subgroup_indices) < 10:
+#         print(f"Skipping {subgroup_name} due to insufficient test samples")
+#         return None
+    
+#     # Get predictions for this subgroup
+#     X_sub_test = X_test.loc[subgroup_indices]
+#     y_sub_test = y_test.loc[subgroup_indices]
+#     X_sub_test_scaled = scaler.transform(X_sub_test)
+    
+#     y_sub_pred = model.predict(X_sub_test_scaled)
+#     y_sub_prob = model.predict_proba(X_sub_test_scaled)[:, 1]
+    
+#     # Calculate performance metrics
+#     metrics = {
+#         'subgroup': subgroup_name,
+#         'size': len(subgroup_indices),
+#         'accuracy': accuracy_score(y_sub_test, y_sub_pred),
+#         'precision': precision_score(y_sub_test, y_sub_pred, zero_division=0),
+#         'recall': recall_score(y_sub_test, y_sub_pred, zero_division=0),
+#         'f1': f1_score(y_sub_test, y_sub_pred, zero_division=0)
+#     }
+    
+#     # Add ROC AUC if both classes are present
+#     if len(np.unique(y_sub_test)) > 1:
+#         metrics['roc_auc'] = roc_auc_score(y_sub_test, y_sub_prob)
+    
+#     print(f"\nPerformance for {subgroup_name} (n={metrics['size']}):")
+#     print(f"Accuracy: {metrics['accuracy']:.4f}")
+#     print(f"Precision: {metrics['precision']:.4f}")
+#     print(f"Recall: {metrics['recall']:.4f}")
+#     print(f"F1 Score: {metrics['f1']:.4f}")
+#     if 'roc_auc' in metrics:
+#         print(f"ROC AUC: {metrics['roc_auc']:.4f}")
+    
+#     return metrics
+
+# def evaluate_subgroup_performance(subgroup_name, subgroup_condition):
+#     """Evaluate model performance on a specific demographic subgroup"""
+#     # Get indices of test set samples in this subgroup
+#     subgroup_indices = X_test[subgroup_condition].index
+    
+#     print(f"Subgroup {subgroup_name} size: {len(subgroup_indices)}")  # Debug print for size
+    
+#     if len(subgroup_indices) < 10:
+#         print(f"Skipping {subgroup_name} due to insufficient test samples")
+#         return None
+    
+#     # Get predictions for this subgroup
+#     X_sub_test = X_test.loc[subgroup_indices]
+#     y_sub_test = y_test.loc[subgroup_indices]
+#     X_sub_test_scaled = scaler.transform(X_sub_test)
+    
+#     y_sub_pred = model.predict(X_sub_test_scaled)
+#     y_sub_prob = model.predict_proba(X_sub_test_scaled)[:, 1]
+    
+#     # Calculate performance metrics
+#     metrics = {
+#         'subgroup': subgroup_name,
+#         'size': len(subgroup_indices),
+#         'accuracy': accuracy_score(y_sub_test, y_sub_pred),
+#         'precision': precision_score(y_sub_test, y_sub_pred, zero_division=0),
+#         'recall': recall_score(y_sub_test, y_sub_pred, zero_division=0),
+#         'f1': f1_score(y_sub_test, y_sub_pred, zero_division=0)
+#     }
+    
+#     # Add ROC AUC if both classes are present
+#     if len(np.unique(y_sub_test)) > 1:
+#         metrics['roc_auc'] = roc_auc_score(y_sub_test, y_sub_prob)
+    
+#     print(f"\nPerformance for {subgroup_name} (n={metrics['size']}):")
+#     print(f"Accuracy: {metrics['accuracy']:.4f}")
+#     print(f"Precision: {metrics['precision']:.4f}")
+#     print(f"Recall: {metrics['recall']:.4f}")
+#     print(f"F1 Score: {metrics['f1']:.4f}")
+#     if 'roc_auc' in metrics:
+#         print(f"ROC AUC: {metrics['roc_auc']:.4f}")
+    
+#     return metrics
+
 def evaluate_subgroup_performance(subgroup_name, subgroup_condition):
-    """Evaluate model performance on a specific demographic subgroup"""
+    """Evaluate model performance with bootstrap confidence intervals"""
     # Get indices of test set samples in this subgroup
     subgroup_indices = X_test[subgroup_condition].index
+    
+    print(f"Subgroup {subgroup_name} size: {len(subgroup_indices)}")
     
     if len(subgroup_indices) < 10:
         print(f"Skipping {subgroup_name} due to insufficient test samples")
@@ -353,15 +441,31 @@ def evaluate_subgroup_performance(subgroup_name, subgroup_condition):
     if len(np.unique(y_sub_test)) > 1:
         metrics['roc_auc'] = roc_auc_score(y_sub_test, y_sub_prob)
     
+    # Calculate confidence intervals for each metric
+    ci_metrics = {}
+    for metric_name, metric_func in [
+        ('accuracy', accuracy_score),
+        ('precision', lambda y_t, y_p: precision_score(y_t, y_p, zero_division=0)),
+        ('recall', lambda y_t, y_p: recall_score(y_t, y_p, zero_division=0)),
+        ('f1', lambda y_t, y_p: f1_score(y_t, y_p, zero_division=0))
+    ]:
+        lower, upper = bootstrap_metric(y_sub_test, y_sub_pred, metric_func)
+        ci_metrics[f'{metric_name}_ci'] = (lower, upper)
+    
+    # Print results with confidence intervals
     print(f"\nPerformance for {subgroup_name} (n={metrics['size']}):")
-    print(f"Accuracy: {metrics['accuracy']:.4f}")
-    print(f"Precision: {metrics['precision']:.4f}")
-    print(f"Recall: {metrics['recall']:.4f}")
-    print(f"F1 Score: {metrics['f1']:.4f}")
+    print(f"Accuracy: {metrics['accuracy']:.4f}, 95% CI: {ci_metrics['accuracy_ci']}")
+    print(f"Precision: {metrics['precision']:.4f}, 95% CI: {ci_metrics['precision_ci']}")
+    print(f"Recall: {metrics['recall']:.4f}, 95% CI: {ci_metrics['recall_ci']}")
+    print(f"F1 Score: {metrics['f1']:.4f}, 95% CI: {ci_metrics['f1_ci']}")
+    
     if 'roc_auc' in metrics:
         print(f"ROC AUC: {metrics['roc_auc']:.4f}")
     
+    # Store confidence intervals in metrics dictionary
+    metrics.update(ci_metrics)
     return metrics
+
 
 # Evaluate performance across gender groups
 print("\n===== Model Performance by Gender =====")
@@ -371,7 +475,7 @@ female_metrics = evaluate_subgroup_performance("Female", female_condition)
 # Evaluate performance across age groups
 print("\n===== Model Performance by Age Group =====")
 age_metrics = {}
-for age_group in ["30s-40s", "50s", "60+"]:
+for age_group in ["40s", "50s", "60s"]:
     age_condition = df['Age Group'] == age_group
     age_metrics[age_group] = evaluate_subgroup_performance(f"Age {age_group}", age_condition)
 

@@ -1,4 +1,4 @@
-# mitigation_approach4.py - Ensemble with Threshold Calibration
+# mitigation_approach5.py - Ensemble with Threshold Calibration and smote 
 
 import pandas as pd
 import numpy as np
@@ -244,7 +244,7 @@ def create_demographic_models(df, X, y, intersectional_groups):
         }
     
     return demographic_models, X_train, X_test, y_train, y_test, train_demographics, test_demographics
-    
+
 # def create_demographic_models(df, X, y, intersectional_groups):
 #     """Train optimized models for each demographic group."""
 #     demographic_models = {}
