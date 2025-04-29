@@ -297,7 +297,8 @@ def train_specialized_model(X_train, y_train, demographic_condition, cv=5, rando
         param_grid,
         cv=cv_folds,
         scoring='roc_auc',  # You can change this to 'accuracy', 'f1', etc.
-        n_jobs=-1          # Use all available cores
+        n_jobs=-1,
+        class_weight='balanced'       # Use all available cores
     )
     
     # Fit grid search
@@ -568,6 +569,308 @@ def compare_specialized_vs_baseline(specialized_metrics, baseline_metrics, metri
     
     return comparison_df
 
+from sklearn.ensemble import VotingClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score
+
+def create_weighted_ensemble(baseline_model, specialized_models, X_val, y_val, demographic_conditions):
+    """
+    Create a weighted ensemble combining baseline and specialized models
+    
+    Parameters:
+    -----------
+    baseline_model : estimator
+        Trained baseline model
+    specialized_models : dict
+        Dictionary of specialized models for each demographic group
+    X_val : DataFrame
+        Validation features
+    y_val : Series
+        Validation target
+    demographic_conditions : dict
+        Dictionary of demographic conditions
+        
+    Returns:
+    --------
+    ensemble_model : VotingClassifier
+        Weighted ensemble model
+    model_weights : dict
+        Dictionary of model weights for each demographic group
+    """
+    # Dictionary to store weights for each model and demographic group
+    model_weights = {}
+    
+    # Calculate weights based on validation accuracy for each demographic group
+    for group_name, condition in demographic_conditions.items():
+        # Get validation samples for this demographic group
+        valid_indices = [idx for idx in X_val.index if idx in condition.index]
+        valid_condition = condition.loc[valid_indices]
+        X_val_demo = X_val[valid_condition]
+        y_val_demo = y_val[valid_condition.index]
+        
+        if len(X_val_demo) < 5 or group_name not in specialized_models or specialized_models[group_name] is None:
+            # Use baseline model if specialized model is unavailable
+            model_weights[group_name] = {'baseline': 1.0, 'specialized': 0.0}
+            continue
+            
+        # Calculate accuracy for baseline model on this group
+        baseline_pred = baseline_model.predict(X_val_demo)
+        baseline_acc = accuracy_score(y_val_demo, baseline_pred)
+        
+        # Calculate accuracy for specialized model on this group
+        specialized_pred = specialized_models[group_name].predict(X_val_demo)
+        specialized_acc = accuracy_score(y_val_demo, specialized_pred)
+        
+        # Normalize to sum to 1
+        total_acc = baseline_acc + specialized_acc
+        if total_acc > 0:
+            model_weights[group_name] = {
+                'baseline': baseline_acc / total_acc,
+                'specialized': specialized_acc / total_acc
+            }
+        else:
+            model_weights[group_name] = {'baseline': 0.5, 'specialized': 0.5}
+    
+    # Create a class that implements the weighted ensemble
+    class DemographicEnsemble:
+        def __init__(self, baseline_model, specialized_models, model_weights, demographic_conditions):
+            self.baseline_model = baseline_model
+            self.specialized_models = specialized_models
+            self.model_weights = model_weights
+            self.demographic_conditions = demographic_conditions
+            self.classes_ = baseline_model.classes_
+            
+        def predict(self, X):
+            predictions = []
+            for idx, sample in X.iterrows():
+                # Find which demographic groups this sample belongs to
+                group_weights = {}
+                for group_name, condition in self.demographic_conditions.items():
+                    if idx in condition.index and condition.loc[idx]:
+                        if group_name in self.model_weights:
+                            group_weights[group_name] = self.model_weights[group_name]
+                
+                if not group_weights:  # No matching group
+                    # Use baseline model
+                    predictions.append(self.baseline_model.predict(sample.values.reshape(1, -1))[0])
+                else:
+                    # Weighted vote from all applicable demographic models
+                    baseline_weight = sum(w['baseline'] for w in group_weights.values()) / len(group_weights)
+                    specialized_votes = []
+                    specialized_weights = []
+                    
+                    for group, weights in group_weights.items():
+                        if group in self.specialized_models and self.specialized_models[group] is not None:
+                            specialized_votes.append(
+                                self.specialized_models[group].predict(sample.values.reshape(1, -1))[0]
+                            )
+                            specialized_weights.append(weights['specialized'])
+                    
+                    # If no specialized models available, use baseline
+                    if not specialized_votes:
+                        predictions.append(self.baseline_model.predict(sample.values.reshape(1, -1))[0])
+                    else:
+                        # Weighted voting
+                        baseline_vote = self.baseline_model.predict(sample.values.reshape(1, -1))[0]
+                        if baseline_weight > sum(specialized_weights) / len(specialized_weights):
+                            predictions.append(baseline_vote)
+                        else:
+                            # Take the most common specialized prediction
+                            from collections import Counter
+                            specialized_counter = Counter(specialized_votes)
+                            predictions.append(specialized_counter.most_common(1)[0][0])
+            
+            return np.array(predictions)
+            
+        def predict_proba(self, X):
+            probas = []
+            for idx, sample in X.iterrows():
+                # Similar logic to predict method but for probabilities
+                # This is a simplified version
+                group_weights = {}
+                for group_name, condition in self.demographic_conditions.items():
+                    if idx in condition.index and condition.loc[idx]:
+                        if group_name in self.model_weights:
+                            group_weights[group_name] = self.model_weights[group_name]
+                
+                if not group_weights:  # No matching group
+                    probas.append(self.baseline_model.predict_proba(sample.values.reshape(1, -1))[0])
+                else:
+                    baseline_weight = sum(w['baseline'] for w in group_weights.values()) / len(group_weights)
+                    baseline_proba = self.baseline_model.predict_proba(sample.values.reshape(1, -1))[0] * baseline_weight
+                    
+                    specialized_probas = np.zeros_like(baseline_proba)
+                    total_specialized_weight = 0
+                    
+                    for group, weights in group_weights.items():
+                        if group in self.specialized_models and self.specialized_models[group] is not None:
+                            specialized_proba = self.specialized_models[group].predict_proba(
+                                sample.values.reshape(1, -1)
+                            )[0]
+                            specialized_probas += specialized_proba * weights['specialized']
+                            total_specialized_weight += weights['specialized']
+                    
+                    if total_specialized_weight > 0:
+                        specialized_probas /= total_specialized_weight
+                        # Weighted average of baseline and specialized probabilities
+                        final_proba = baseline_proba + specialized_probas
+                        final_proba /= 2  # Normalize
+                    else:
+                        final_proba = baseline_proba
+                    
+                    probas.append(final_proba)
+            
+            return np.array(probas)
+    
+    # Create the ensemble model
+    ensemble_model = DemographicEnsemble(
+        baseline_model, 
+        specialized_models, 
+        model_weights, 
+        demographic_conditions
+    )
+    
+    return ensemble_model, model_weights
+
+
+def create_comparison_table(baseline_metrics, specialized_metrics, ensemble_metrics):
+    """
+    Create a comprehensive comparison table for baseline, specialized, and ensemble models
+    """
+    # Initialize lists for table rows
+    rows = []
+    
+    # Add overall performance
+    if 'Overall' in baseline_metrics and baseline_metrics['Overall'] is not None:
+        rows.append({
+            'Category': 'Overall',
+            'Group': 'All Data',
+            'Model Type': 'Baseline',
+            'Sample Size': baseline_metrics['Overall']['size'],
+            'Accuracy': baseline_metrics['Overall'].get('accuracy', np.nan),
+            'Precision': baseline_metrics['Overall'].get('precision', np.nan),
+            'Recall': baseline_metrics['Overall'].get('recall', np.nan),
+            'F1 Score': baseline_metrics['Overall'].get('f1', np.nan),
+            'ROC AUC': baseline_metrics['Overall'].get('roc_auc', np.nan)
+        })
+    
+    if 'Overall' in ensemble_metrics and ensemble_metrics['Overall'] is not None:
+        rows.append({
+            'Category': 'Overall',
+            'Group': 'All Data',
+            'Model Type': 'Ensemble',
+            'Sample Size': ensemble_metrics['Overall']['size'],
+            'Accuracy': ensemble_metrics['Overall'].get('accuracy', np.nan),
+            'Precision': ensemble_metrics['Overall'].get('precision', np.nan),
+            'Recall': ensemble_metrics['Overall'].get('recall', np.nan),
+            'F1 Score': ensemble_metrics['Overall'].get('f1', np.nan),
+            'ROC AUC': ensemble_metrics['Overall'].get('roc_auc', np.nan)
+        })
+    
+    # Add performance for each demographic group
+    for group_name in baseline_metrics:
+        if group_name == 'Overall' or baseline_metrics[group_name] is None:
+            continue
+            
+        category = 'By Gender' if group_name in ['Male', 'Female'] else \
+                  'By Age Group' if group_name in ['Age 30s-40s', 'Age 50s', 'Age 60+'] else \
+                  'By Intersectional Group'
+                  
+        display_group = group_name.replace('Age ', '') if category == 'By Age Group' else group_name
+        
+        # Add baseline model performance
+        rows.append({
+            'Category': category,
+            'Group': display_group,
+            'Model Type': 'Baseline',
+            'Sample Size': baseline_metrics[group_name]['size'],
+            'Accuracy': baseline_metrics[group_name].get('accuracy', np.nan),
+            'Precision': baseline_metrics[group_name].get('precision', np.nan),
+            'Recall': baseline_metrics[group_name].get('recall', np.nan),
+            'F1 Score': baseline_metrics[group_name].get('f1', np.nan),
+            'ROC AUC': baseline_metrics[group_name].get('roc_auc', np.nan)
+        })
+        
+        # Add specialized model performance if available
+        if group_name in specialized_metrics and specialized_metrics[group_name] is not None:
+            rows.append({
+                'Category': category,
+                'Group': display_group,
+                'Model Type': 'Specialized',
+                'Sample Size': specialized_metrics[group_name]['size'],
+                'Accuracy': specialized_metrics[group_name].get('accuracy', np.nan),
+                'Precision': specialized_metrics[group_name].get('precision', np.nan),
+                'Recall': specialized_metrics[group_name].get('recall', np.nan),
+                'F1 Score': specialized_metrics[group_name].get('f1', np.nan),
+                'ROC AUC': specialized_metrics[group_name].get('roc_auc', np.nan)
+            })
+        
+        # Add ensemble model performance if available
+        if group_name in ensemble_metrics and ensemble_metrics[group_name] is not None:
+            rows.append({
+                'Category': category,
+                'Group': display_group,
+                'Model Type': 'Ensemble',
+                'Sample Size': ensemble_metrics[group_name]['size'],
+                'Accuracy': ensemble_metrics[group_name].get('accuracy', np.nan),
+                'Precision': ensemble_metrics[group_name].get('precision', np.nan),
+                'Recall': ensemble_metrics[group_name].get('recall', np.nan),
+                'F1 Score': ensemble_metrics[group_name].get('f1', np.nan),
+                'ROC AUC': ensemble_metrics[group_name].get('roc_auc', np.nan)
+            })
+    
+    # Create DataFrame and sort
+    comparison_df = pd.DataFrame(rows)
+    comparison_df = comparison_df.sort_values(['Category', 'Group', 'Model Type'])
+    
+    # Save to CSV
+    comparison_df.to_csv('results/model_comparison_with_ensemble.csv', index=False)
+    
+    # Print summary
+    print("\nModel Comparison Summary Table:")
+    print(comparison_df.to_string())
+    
+    # Create visualizations
+    plot_model_comparison(comparison_df)
+    
+    return comparison_df
+
+def plot_model_comparison(comparison_df):
+    """Create visualizations comparing model performance across demographic groups"""
+    metrics = ['Accuracy', 'Precision', 'Recall', 'F1 Score']
+    
+    for metric in metrics:
+        plt.figure(figsize=(12, 8))
+        
+        # Reshape data for grouped bar chart
+        groups = comparison_df['Group'].unique()
+        model_types = comparison_df['Model Type'].unique()
+        
+        for i, group in enumerate(groups):
+            group_data = comparison_df[comparison_df['Group'] == group]
+            x = np.arange(len(model_types))
+            width = 0.8 / len(groups)
+            offset = width * i - width * len(groups) / 2 + width / 2
+            
+            values = []
+            for model_type in model_types:
+                model_data = group_data[group_data['Model Type'] == model_type]
+                if not model_data.empty and not pd.isna(model_data[metric].values[0]):
+                    values.append(model_data[metric].values[0])
+                else:
+                    values.append(0)
+            
+            plt.bar(x + offset, values, width, label=group)
+        
+        plt.xlabel('Model Type')
+        plt.ylabel(metric)
+        plt.title(f'{metric} Comparison Across Models and Demographics')
+        plt.xticks(np.arange(len(model_types)), model_types)
+        plt.legend(title='Demographic Group')
+        plt.tight_layout()
+        plt.savefig(f'results/comparison_{metric.lower().replace(" ", "_")}.png', dpi=300)
+        plt.close()
+
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -582,9 +885,9 @@ sns.set_palette('colorblind')
 
 def main():
     """
-    Main function to run the heart disease prediction pipeline with specialized models
+    Main function to run the heart disease prediction pipeline with ensemble modeling
     """
-    print("======= Heart Disease Prediction with Specialized Models =======\n")
+    print("======= Heart Disease Prediction with Ensemble Modeling =======\n")
     
     # 1. Load and prepare data
     print("Step 1: Loading and preparing data...\n")
@@ -592,40 +895,152 @@ def main():
     
     # 2. Get demographic conditions
     print("\nStep 2: Defining demographic groups...\n")
-    conditions, intersectional_groups = get_demographic_conditions(df)
+    conditions, _ = get_demographic_conditions(df)
     
-    # 3. Prepare data for modeling
+    # 3. Prepare data for modeling with train/validation/test split
     print("\nStep 3: Preparing data for modeling...\n")
-    X_train, X_test, y_train, y_test, X_train_scaled, X_test_scaled, scaler = prepare_data_for_modeling(df)
+    X = df.drop(['Diagnosis', 'Age Group', 'Gender_Age_Group'], axis=1)
+    X = pd.get_dummies(X, drop_first=True)  # One-hot encode categorical variables
+    y = df['Diagnosis']
     
-    # 4. Train and evaluate specialized models
-    print("\nStep 4: Training and evaluating specialized models...\n")
-    specialized_models, specialized_metrics, baseline_metrics = train_and_evaluate_specialized_models(
-        X_train, X_test, y_train, y_test, conditions, scaler
+    # Split into train, validation, and test sets
+    X_train, X_temp, y_train, y_temp = train_test_split(
+        X, y, test_size=0.4, random_state=42, stratify=y
+    )
+    X_val, X_test, y_val, y_test = train_test_split(
+        X_temp, y_temp, test_size=0.5, random_state=42, stratify=y_temp
     )
     
-    # 5. Compare specialized models with baseline
-    print("\nStep 5: Comparing specialized models with baseline...\n")
-    comparison_results = {}
-    for metric in ['accuracy', 'precision', 'recall', 'f1', 'roc_auc']:
+    # Standardize features
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_val_scaled = scaler.transform(X_val)
+    X_test_scaled = scaler.transform(X_test)
+    
+    # 4. Train baseline and specialized models
+    print("\nStep 4: Training baseline and specialized models...\n")
+    
+    # Train baseline model
+    print("\n===== Training Baseline Model =====")
+    baseline_model = LogisticRegression(C=1.0, solver='liblinear', random_state=42, class_weight='balanced')
+    baseline_model.fit(X_train_scaled, y_train)
+    
+    # Evaluate baseline model
+    print("\n===== Evaluating Baseline Model on Test Set =====")
+    baseline_metrics = {}
+    baseline_metrics['Overall'] = evaluate_model(baseline_model, X_test, y_test)
+    
+    # Evaluate baseline model on demographic groups
+    for group_name, condition in conditions.items():
+        print(f"\n===== Evaluating Baseline Model on {group_name} =====")
+        baseline_metrics[group_name] = evaluate_model(
+            baseline_model, X_test, y_test, 
+            demographic_condition=condition, 
+            group_name=group_name
+        )
+    
+    # Train specialized models
+    print("\n===== Training Specialized Models =====")
+    specialized_models = {}
+    specialized_metrics = {}
+    
+    for group_name, condition in conditions.items():
+        # Skip very small groups
+        group_size = condition.sum()
+        if group_size < 10:
+            print(f"\n===== Skipping {group_name} - too few samples ({group_size}) =====")
+            specialized_models[group_name] = None
+            specialized_metrics[group_name] = None
+            continue
+            
+        print(f"\n===== Training Specialized Model for {group_name} =====")
+        
         try:
-            comparison_df = compare_specialized_vs_baseline(specialized_metrics, baseline_metrics, metric)
-            comparison_results[metric] = comparison_df
+            # Get training data for this group
+            train_indices = [idx for idx in X_train.index if idx in condition.index]
+            valid_condition = condition.loc[train_indices]
+            X_train_demo = X_train[valid_condition]
+            y_train_demo = y_train[valid_condition.index]
+            
+            # Check if enough samples and classes
+            if len(X_train_demo) < 10 or len(np.unique(y_train_demo)) < 2:
+                print(f"Insufficient samples or classes for {group_name}")
+                specialized_models[group_name] = None
+                specialized_metrics[group_name] = None
+                continue
+                
+            # Train model
+            specialized_model = LogisticRegression(C=1.0, solver='liblinear', random_state=42, class_weight='balanced')
+            specialized_model.fit(scaler.transform(X_train_demo), y_train_demo)
+            specialized_models[group_name] = specialized_model
+            
+            # Evaluate specialized model
+            print(f"\n===== Evaluating Specialized Model for {group_name} =====")
+            specialized_metrics[group_name] = evaluate_model(
+                specialized_model, X_test, y_test, 
+                demographic_condition=condition, 
+                group_name=group_name
+            )
+            
         except Exception as e:
-            print(f"Error comparing {metric}: {e}")
+            print(f"Error processing {group_name}: {e}")
+            specialized_models[group_name] = None
+            specialized_metrics[group_name] = None
     
-    # 6. Save results
-    print("\nStep 6: Saving results...\n")
+    # 5. Create and evaluate ensemble model
+    print("\nStep 5: Creating and evaluating ensemble model...\n")
     
-    # Save model performance comparisons
-    for metric, df in comparison_results.items():
-        df.to_csv(f'results/specialized_vs_baseline_{metric}.csv', index=False)
+    # Create ensemble model using validation set
+    ensemble_model, model_weights = create_weighted_ensemble(
+        baseline_model, 
+        specialized_models, 
+        X_val, y_val, 
+        conditions
+    )
     
-    # Create a comprehensive performance table
-    create_performance_summary(specialized_metrics, baseline_metrics)
+    # Print model weights
+    print("\nEnsemble Model Weights:")
+    for group, weights in model_weights.items():
+        print(f"{group}: Baseline={weights['baseline']:.2f}, Specialized={weights['specialized']:.2f}")
+    
+    # Evaluate ensemble model
+    print("\n===== Evaluating Ensemble Model on Test Set =====")
+    ensemble_metrics = {}
+    ensemble_metrics['Overall'] = evaluate_model(ensemble_model, X_test, y_test)
+    
+    # Evaluate ensemble model on demographic groups
+    for group_name, condition in conditions.items():
+        if group_name in baseline_metrics and baseline_metrics[group_name] is not None:
+            print(f"\n===== Evaluating Ensemble Model on {group_name} =====")
+            ensemble_metrics[group_name] = evaluate_model(
+                ensemble_model, X_test, y_test, 
+                demographic_condition=condition, 
+                group_name=group_name
+            )
+    
+    # 6. Create comparison table and visualizations
+    print("\nStep 6: Creating comparison table and visualizations...\n")
+    comparison_table = create_comparison_table(
+        baseline_metrics, specialized_metrics, ensemble_metrics
+    )
+    
+    # 7. Save models
+    print("\nStep 7: Saving models...\n")
+    import joblib
+    
+    # Save models
+    joblib.dump(baseline_model, 'results/baseline_model.pkl')
+    joblib.dump(specialized_models, 'results/specialized_models.pkl')
+    joblib.dump(ensemble_model, 'results/ensemble_model.pkl')
+    joblib.dump(scaler, 'results/scaler.pkl')
     
     print("\n======= Analysis Complete =======")
-    print("\nCheck the 'results' directory for saved visualizations and data.")
+    print("\nCheck the 'results' directory for saved models, visualizations, and data.")
+    
+    return baseline_model, specialized_models, ensemble_model, comparison_table
+
+if __name__ == "__main__":
+    main()
 
 def create_performance_summary(specialized_metrics, baseline_metrics):
     """
@@ -743,6 +1158,43 @@ def create_performance_summary(specialized_metrics, baseline_metrics):
     print(summary_df.to_string())
     
     return summary_df
+
+
+# def plot_model_comparison(comparison_df):
+#     """Create visualizations comparing model performance across demographic groups"""
+#     metrics = ['Accuracy', 'Precision', 'Recall', 'F1 Score']
+    
+#     for metric in metrics:
+#         plt.figure(figsize=(12, 8))
+        
+#         # Reshape data for grouped bar chart
+#         groups = comparison_df['Group'].unique()
+#         model_types = comparison_df['Model Type'].unique()
+        
+#         for i, group in enumerate(groups):
+#             group_data = comparison_df[comparison_df['Group'] == group]
+#             x = np.arange(len(model_types))
+#             width = 0.8 / len(groups)
+#             offset = width * i - width * len(groups) / 2 + width / 2
+            
+#             values = []
+#             for model_type in model_types:
+#                 model_data = group_data[group_data['Model Type'] == model_type]
+#                 if not model_data.empty and not pd.isna(model_data[metric].values[0]):
+#                     values.append(model_data[metric].values[0])
+#                 else:
+#                     values.append(0)
+            
+#             plt.bar(x + offset, values, width, label=group)
+        
+#         plt.xlabel('Model Type')
+#         plt.ylabel(metric)
+#         plt.title(f'{metric} Comparison Across Models and Demographics')
+#         plt.xticks(np.arange(len(model_types)), model_types)
+#         plt.legend(title='Demographic Group')
+#         plt.tight_layout()
+#         plt.savefig(f'results/comparison_{metric.lower().replace(" ", "_")}.png', dpi=300)
+#         plt.close()
 
 if __name__ == "__main__":
     main()
