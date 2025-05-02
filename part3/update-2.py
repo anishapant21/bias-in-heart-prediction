@@ -209,6 +209,23 @@ def analyze_demographic_groups(df):
     }
 
 # ----------------- VISUALIZATION FUNCTIONS -----------------
+def plot_gender_disease_distribution(df):
+    """
+    Display bar plot of gender vs disease presence
+    """
+    # Map 'Sex' column if it's numeric (ensure compatibility)
+    if df['Sex'].dtype in [int, float]:
+        df['Sex'] = df['Sex'].map({0: 'Female', 1: 'Male'})
+
+    # Create a grouped bar plot
+    plt.figure(figsize=(8, 6))
+    sns.countplot(data=df, x='Sex', hue='Diagnosis', palette='Set2')
+    plt.title('Heart Disease Distribution by Gender')
+    plt.xlabel('Gender')
+    plt.ylabel('Count')
+    plt.legend(title='Heart Disease', labels=['No Disease', 'Disease'])
+    plt.tight_layout()
+    plt.show()
 
 def visualize_coefficient_comparison(group1_name, group1_coeffs, group2_name, group2_coeffs, top_n=5):
     """
@@ -561,6 +578,189 @@ def visualize_performance_metrics(evaluation_results):
     if roc_metrics:
         plot_performance_comparison(roc_metrics, 'roc_auc')
 
+def plot_combined_performance_metrics(evaluation_results, save_path='combined_performance_metrics.png'):
+    """
+    Create a single visualization showing accuracy, precision, recall, and F1 score
+    across different demographic subgroups.
+    """
+    import pandas as pd
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    import numpy as np
+    
+    # Combine all metrics for visualization
+    all_metrics = [
+        evaluation_results['male_metrics'], 
+        evaluation_results['female_metrics']
+    ]
+    all_metrics.extend([m for m in evaluation_results['age_metrics'].values() if m is not None])
+    all_metrics.extend([m for m in evaluation_results['intersect_metrics'].values() if m is not None])
+    
+    # Filter out None values
+    all_metrics = [m for m in all_metrics if m is not None]
+    
+    if not all_metrics:
+        print("No metrics to visualize")
+        return
+    
+    # Create dataframe for plotting with all metrics
+    metrics_to_plot = ['accuracy', 'precision', 'recall', 'f1']
+    plot_data = []
+    
+    for metric_dict in all_metrics:
+        group_name = metric_dict['subgroup']
+        for metric in metrics_to_plot:
+            if metric in metric_dict:
+                plot_data.append({
+                    'Group': group_name,
+                    'Metric': metric.capitalize(),
+                    'Value': metric_dict[metric]
+                })
+    
+    plot_df = pd.DataFrame(plot_data)
+    
+    # Set up the figure
+    plt.figure(figsize=(14, 10))
+    
+    # Create the grouped bar chart
+    g = sns.catplot(
+        data=plot_df,
+        kind="bar",
+        x="Group", y="Value", hue="Metric",
+        palette="Set2", alpha=0.9, height=8, aspect=1.5,
+        legend_out=False
+    )
+    
+    # Customize the plot
+    g.set_xticklabels(rotation=45, ha='right')
+    g.set(ylim=(0, 1.0))
+    g.set_axis_labels("Demographic Group", "Score Value")
+    g.legend.set_title("Performance Metrics")
+    
+    plt.title('Heart Disease Model Performance Across Demographics', fontsize=16, pad=20)
+    plt.tight_layout()
+    
+    # Add value labels on bars
+    # Get the current axis from the FacetGrid
+    ax = g.axes[0, 0]
+    
+    # Iterate through the bars
+    for i, bar in enumerate(ax.patches):
+        # Get the height of the bar
+        height = bar.get_height()
+        # Add text label
+        ax.text(
+            bar.get_x() + bar.get_width()/2., 
+            height + 0.01, 
+            f'{height:.2f}', 
+            ha='center', va='bottom',
+            fontsize=8
+        )
+    
+    # Save the plot
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    print(f"Combined metrics visualization saved to {save_path}")
+    
+    return g
+
+def plot_advanced_combined_metrics(evaluation_results, save_path='advanced_performance_metrics.png'):
+    """
+    Create an advanced visualization showing all metrics in a single figure
+    with a more sophisticated layout using subplots.
+    """
+    import pandas as pd
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    import numpy as np
+    from matplotlib.gridspec import GridSpec
+    
+    # Combine all metrics for visualization
+    all_metrics = [
+        evaluation_results['male_metrics'], 
+        evaluation_results['female_metrics']
+    ]
+    all_metrics.extend([m for m in evaluation_results['age_metrics'].values() if m is not None])
+    all_metrics.extend([m for m in evaluation_results['intersect_metrics'].values() if m is not None])
+    
+    # Filter out None values
+    all_metrics = [m for m in all_metrics if m is not None]
+    
+    if not all_metrics:
+        print("No metrics to visualize")
+        return
+    
+    # Create dataframe for plotting with all metrics
+    plot_data = pd.DataFrame([
+        {
+            'Group': m['subgroup'],
+            'Accuracy': m.get('accuracy', np.nan),
+            'Precision': m.get('precision', np.nan),
+            'Recall': m.get('recall', np.nan),
+            'F1 Score': m.get('f1', np.nan),
+            'Sample Size': m['size']
+        }
+        for m in all_metrics
+    ])
+    
+    # Set up the figure with GridSpec for more control
+    fig = plt.figure(figsize=(15, 12))
+    gs = GridSpec(2, 2, figure=fig, wspace=0.3, hspace=0.4)
+    
+    metrics = ['Accuracy', 'Precision', 'Recall', 'F1 Score']
+    colors = sns.color_palette("Set2", len(plot_data))
+    
+    # Create a bar plot for each metric
+    for i, metric in enumerate(metrics):
+        ax = fig.add_subplot(gs[i//2, i%2])
+        
+        # Sort data by this metric value
+        sorted_data = plot_data.sort_values(by=metric, ascending=False)
+        
+        # Create the bar plot
+        bars = sns.barplot(x='Group', y=metric, data=sorted_data, ax=ax, palette=colors)
+        
+        # Add value labels
+        for j, bar in enumerate(bars.patches):
+            ax.text(
+                bar.get_x() + bar.get_width()/2.,
+                bar.get_height() + 0.01,
+                f'{bar.get_height():.3f}',
+                ha='center', va='bottom',
+                fontsize=9
+            )
+        
+        # Customize subplot
+        ax.set_title(f'{metric} by Demographic Group', fontsize=12)
+        ax.set_ylim(0, 1.0)
+        ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha='right', fontsize=9)
+        
+        # Add sample size as text below x-labels
+        for tick, group in zip(ax.get_xticklabels(), sorted_data['Group']):
+            sample = sorted_data[sorted_data['Group'] == group]['Sample Size'].values[0]
+            ax.text(
+                tick.get_position()[0],
+                -0.07,
+                f'n={sample}',
+                ha='center',
+                transform=ax.get_xaxis_transform(),
+                fontsize=8,
+                alpha=0.7
+            )
+    
+    # Add overall title
+    plt.suptitle('Heart Disease Model Performance Metrics by Demographic Group', 
+                fontsize=16, y=0.98)
+    
+    # Add a text note about sample sizes
+    fig.text(0.5, 0.01, "Note: 'n' values indicate sample size for each group", 
+             ha='center', fontsize=10, style='italic')
+    
+    # Save the figure
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    print(f"Advanced combined metrics visualization saved to {save_path}")
+    
+    return fig
+
 # ----------------- MAIN EXECUTION -----------------
 
 def main():
@@ -578,6 +778,8 @@ def main():
     
     # Step 4: Analyze demographic groups and their feature coefficients
     analysis_results = analyze_demographic_groups(df)
+
+    plot_gender_disease_distribution(df)
     
     # Step 5: Create coefficient visualizations
     create_coefficient_visualizations(analysis_results)
@@ -600,6 +802,11 @@ def main():
     
     # Step 11: Visualize performance metrics across groups
     visualize_performance_metrics(evaluation_results)
+    
+    # Step 12: Create combined visualization of all metrics
+    plot_combined_performance_metrics(evaluation_results)
+
+    plot_advanced_combined_metrics(evaluation_results)
     
     return {
         'df': df,
